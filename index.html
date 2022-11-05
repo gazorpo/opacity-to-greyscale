@@ -1,0 +1,290 @@
+<!doctype html>
+
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Opacity to Greyscale</title>
+</head>
+
+<body>
+  <h1>Opacity to Greyscale</h1>
+  <p>Convert an image's alpha channel to a greyscale image</p>
+  <p>Supported:
+  <ul>
+    <li>DDS files with DXT5 (BC3) compression</li>
+    <li>Eight-bit PNG files</li>
+  </ul>
+  </p>
+
+  <h2 id="inputImageHeading">Input</h2>
+  <input type="file" name="inputImage" id="inputImage" aria-labelledby="inputImageHeading">
+
+  <h2>Output</h2>
+  <canvas id="result"></canvas>
+
+  <style>
+    .image-container img {
+      max-height: 256px;
+      max-width: 256px;
+    }
+  </style>
+
+  <script>
+    const inputImageInput = document.getElementById('inputImage')
+
+    async function handleInput() {
+      let imageData
+
+      if (inputImageInput.files.length) {
+        const file = inputImageInput.files[0]
+
+        if (file.type === 'image/vnd.ms-dds') {
+          const fileBytes = await getFileBytes(file)
+          imageData = getDdsImageData(fileBytes)
+        } else if (file.type === 'image/png')
+          imageData = await getFileImageData(file)
+        else alert('Only DDS and PNG files supported')
+      }
+
+      if (!imageData) return
+
+      const newImageData = getAlphaGrayscaleImageData(imageData)
+
+      const canvas = document.getElementById('result')
+      canvas.width = imageData.width
+      canvas.height = imageData.height
+      const context = canvas.getContext('2d')
+      context.putImageData(newImageData, 0, 0)
+    }
+
+    const getFileImageData = (file) => new Promise((resolve, reject) => {
+      const fileReader = new FileReader()
+
+      fileReader.addEventListener('load', event => {
+        const dataURL = event.target.result
+        const imageElement = document.createElement('img')
+
+        imageElement.addEventListener('load', () => {
+          const canvas = document.createElement('canvas')
+          canvas.width = imageElement.width
+          canvas.height = imageElement.height
+          const context = canvas.getContext('2d')
+          context.drawImage(imageElement, 0, 0)
+          const imageData = context.getImageData(0, 0, imageElement.width, imageElement.height)
+          resolve(imageData)
+        })
+
+        imageElement.addEventListener('error', reject)
+
+        imageElement.src = dataURL
+      })
+
+      fileReader.addEventListener('abort', reject)
+      fileReader.addEventListener('error', reject)
+
+      fileReader.readAsDataURL(file)
+    })
+
+    const getFileBytes = (file) => new Promise((resolve, reject) => {
+      const fileReader = new FileReader()
+
+      fileReader.addEventListener('abort', reject)
+      fileReader.addEventListener('error', reject)
+
+      fileReader.addEventListener('load', () => {
+        const data = new Uint8Array(fileReader.result)
+        resolve(data)
+      })
+
+      fileReader.readAsArrayBuffer(file)
+    })
+
+    inputImageInput.addEventListener('change', handleInput)
+
+    function getAlphaGrayscaleImageData(imageData) {
+      const newDataArray = new Uint8ClampedArray(imageData.data.length)
+
+      for (let index = 3; index < imageData.data.length; index += 4) {
+        newDataArray[index - 3] = newDataArray[index - 2] = newDataArray[index - 1] = imageData.data[index]
+        newDataArray[index] = 255
+      }
+
+      return new ImageData(newDataArray, imageData.width)
+    }
+
+    function getDdsImageData(ddsFileUint8Array) {
+      const heightBytes = [...ddsFileUint8Array].slice(12, 16)
+      const height = getIntegerFromLittleEndianBytes(heightBytes)
+
+      const widthBytes = [...ddsFileUint8Array].slice(16, 20)
+      const width = getIntegerFromLittleEndianBytes(widthBytes)
+
+      const compressionTypeBytes = ddsFileUint8Array.slice(84, 88)
+      const compressionType = String.fromCharCode(...compressionTypeBytes)
+      if (compressionType !== 'DXT5') alert('Only DDS with DXT5 (BC3) compression supported')
+
+      const compressedBytes = ddsFileUint8Array.slice(128)
+      const decompressedBytes = getDecompressed(compressedBytes, width, height)
+      const clampedDecompressedBytes = new Uint8ClampedArray(decompressedBytes)
+
+      return new ImageData(clampedDecompressedBytes, width)
+    }
+
+    function getIntegerFromLittleEndianBytes(bytes) {
+      const binaryString = getBinaryStringFromLittleEndianBytes(bytes)
+      return parseInt(binaryString, 2)
+    }
+
+    function getBinaryStringFromLittleEndianBytes(bytes) {
+      const bigEndianBytes = [...bytes].reverse()
+      const byteStrings = bigEndianBytes.map(getByteString)
+      return byteStrings.join('')
+    }
+
+    const getByteString = (byte) => byte.toString(2).padStart(8, '0')
+
+    function unpack(byte1, byte2, colour, offset) {
+      const value = byte1 | (byte2 << 8)
+
+      const red = (value >> 11) & 0x1f
+      const green = (value >> 5) & 0x3f
+      const blue = value & 0x1f
+
+      colour[offset] = (red << 3) | (red >> 2)
+      colour[offset + 1] = (green << 2) | (green >> 4)
+      colour[offset + 2] = (blue << 3) | (blue >> 2)
+      colour[offset + 3] = 255
+
+      return value
+    }
+
+    function decompressColor(rgba, blockBytes, nOffset) {
+      const codes = new Uint8Array(16)
+
+      const c0Value = unpack(blockBytes[nOffset], blockBytes[nOffset + 1], codes, 0)
+      const c1Value = unpack(blockBytes[nOffset + 2], blockBytes[nOffset + 3], codes, 4)
+
+      for (let i = 0; i < 3; i++) {
+        const c0 = codes[i]
+        const c1 = codes[4 + i]
+
+        if (c0Value <= c1Value) {
+          codes[8 + i] = (c0 + c1) / 2 // c2
+          codes[12 + i] = 0 // c3
+        } else {
+          codes[8 + i] = (2 * c0 + c1) / 3 // c2
+          codes[12 + i] = (c0 + 2 * c1) / 3 // c3
+        }
+      }
+
+      codes[8 + 3] = 255 // c2 alpha
+      codes[12 + 3] = 0 // c3 alpha
+
+      const lookupTableValues = new Uint8Array(16)
+      // Iterate over lookup table bytes
+      for (let i = 0; i < 4; ++i) {
+        const lookupTableByte = blockBytes[nOffset + 4 + i]
+
+        lookupTableValues[4 * i] = lookupTableByte & 0x3 // last 2bit value in byte
+        lookupTableValues[4 * i + 1] = (lookupTableByte >> 2) & 0x3 // third 2bit value in byte
+        lookupTableValues[4 * i + 2] = (lookupTableByte >> 4) & 0x3 // second 2bit value in byte
+        lookupTableValues[4 * i + 3] = (lookupTableByte >> 6) & 0x3 // first 2bit value in byte
+      }
+
+      for (let i = 0; i < 16; ++i) {
+        const offset = 4 * lookupTableValues[i]
+        for (let j = 0; j < 4; ++j)
+          rgba[4 * i + j] = codes[offset + j]
+      }
+    }
+
+    function decompressAlpha(rgba, block, nOffset) {
+      var alpha0 = block[nOffset + 0];
+      var alpha1 = block[nOffset + 1];
+
+      var codes = new Uint8Array(8);
+
+      codes[0] = alpha0;
+      codes[1] = alpha1;
+      if (alpha0 <= alpha1) {
+        // use 5-alpha codebook
+        for (var i = 1; i < 5; ++i)
+          codes[1 + i] = ((5 - i) * alpha0 + i * alpha1) / 5;
+        codes[6] = 0;
+        codes[7] = 255;
+      }
+      else {
+        // use 7-alpha codebook
+        for (var i = 1; i < 7; ++i)
+          codes[1 + i] = ((7 - i) * alpha0 + i * alpha1) / 7;
+      }
+
+      var indices = new Uint8Array(16);
+      var nOffset = nOffset + 2;
+      var nBegin = 0;
+      for (var i = 0; i < 2; ++i) {
+        // grab 3 bytes
+        var value = 0;
+        for (var j = 0; j < 3; ++j) {
+          var byte = block[nOffset++];
+          value |= (byte << 8 * j);
+        }
+
+        // unpack 8 3-bit values from it
+        for (var j = 0; j < 8; ++j) {
+          var index = (value >> 3 * j) & 0x7;
+          indices[nBegin++] = index;
+        }
+      }
+
+      for (var i = 0; i < 16; ++i)
+        rgba[4 * i + 3] = codes[indices[i]];
+    }
+
+    function getDecompressedBlock(blockBytes, offset) {
+      const newBlockBytes = new Uint8Array(4 * 16)
+      decompressColor(newBlockBytes, blockBytes, offset + 8)
+      decompressAlpha(newBlockBytes, blockBytes, offset)
+      return newBlockBytes
+    }
+
+    function getDecompressed(compressedBytes, width, height) {
+      const newBytes = new Uint8Array(4 * width * height)
+
+      // Generate one 4x4=16 pixel block at a time
+      let nOffset = 0
+      for (let y = 0; y < height; y += 4) {
+        for (let x = 0; x < width; x += 4) {
+          const blockBytes = getDecompressedBlock(compressedBytes, nOffset)
+
+          // Iterate over pixels in block
+          let nOffsetTarget = 0
+          for (let py = 0; py < 4; ++py) {
+            for (let px = 0; px < 4; ++px) {
+              const sx = x + px
+              const sy = y + py
+
+              if (sx < width && sy < height) {
+                let nBegin = 4 * (width * sy + sx)
+
+                // Add pixel R, G, B, and A values to final result
+                newBytes[nBegin] = blockBytes[nOffsetTarget]
+                newBytes[nBegin + 1] = blockBytes[nOffsetTarget + 1]
+                newBytes[nBegin + 2] = blockBytes[nOffsetTarget + 2]
+                newBytes[nBegin + 3] = blockBytes[nOffsetTarget + 3]
+                nOffsetTarget += 4
+              } else nOffsetTarget += 4
+            }
+          }
+
+          nOffset += 16
+        }
+      }
+
+      return newBytes
+    }
+  </script>
+</body>
+
+</html>
